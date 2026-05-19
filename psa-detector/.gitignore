@@ -2,5 +2,7 @@
 # This .gitignore file was automatically created by Microsoft(R) Visual Studio.
 ################################################################################
 
-/x64/Debug
 /.vs
+/psa-detector/x64/Debug
+/x64/Debug
+/OpenCV_Debug.props
