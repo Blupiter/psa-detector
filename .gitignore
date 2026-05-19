@@ -5,3 +5,5 @@
 /x64/Debug
 /.vs
 /psa-detector/x64/Debug
+/x64/Debug
+/OpenCV_Debug.props
