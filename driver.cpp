@@ -88,35 +88,39 @@ const HoughParams HORIZONTAL_HOUGH_PARAMS = {
     HORIZONTAL_HOUGH_MAX_LINE_GAP
 };
 
-typedef struct VerticalLineEvidence {
+// A real/raw vertical line segment found by Hough.
+typedef struct ActualVerticalLine {
     int x;
     int topY;
     int bottomY;
-} VerticalLineEvidence;
+} ActualVerticalLine;
 
-typedef struct MergedDivider {
+// A final/merged vertical parking divider.
+typedef struct FinalVerticalLine {
     int x;
     int topY;
     int bottomY;
-} MergedDivider;
+} FinalVerticalLine;
 
-typedef struct HorizontalLineEvidence {
+// A real/raw horizontal line segment found by Hough.
+typedef struct ActualHorizontalLine {
     int y;
     int leftX;
     int rightX;
-} HorizontalLineEvidence;
+} ActualHorizontalLine;
 
 typedef struct Interval {
     int leftX;
     int rightX;
 } Interval;
 
-typedef struct MergedHorizontalDivider {
+// A final/merged horizontal parking-row divider.
+typedef struct FinalHorizontalLine {
     int y;
     int leftX;
     int rightX;
     int connectedCoverage;
-} MergedHorizontalDivider;
+} FinalHorizontalLine;
 
 // --------------------------------------------------
 // Utility functions
@@ -224,11 +228,11 @@ bool isVerticalLine(const Vec4i& lineSegment, int imageHeight) {
     return angleIsVertical && lineIsLongEnough;
 }
 
-vector<VerticalLineEvidence> getVerticalLineEvidence(
+vector<ActualVerticalLine> getActualVerticalLines(
     const vector<Vec4i>& lines,
     Mat& verticalLineDisplay
 ) {
-    vector<VerticalLineEvidence> evidenceList;
+    vector<ActualVerticalLine> actualVerticalLines;
 
     for (const Vec4i& l : lines) {
         if (isVerticalLine(l, verticalLineDisplay.rows)) {
@@ -249,139 +253,142 @@ vector<VerticalLineEvidence> getVerticalLineEvidence(
             int topY = min(y1, y2);
             int bottomY = max(y1, y2);
 
-            VerticalLineEvidence evidence;
-            evidence.x = xAvg;
-            evidence.topY = topY;
-            evidence.bottomY = bottomY;
+            ActualVerticalLine actualLine;
+            actualLine.x = xAvg;
+            actualLine.topY = topY;
+            actualLine.bottomY = bottomY;
 
-            evidenceList.push_back(evidence);
+            actualVerticalLines.push_back(actualLine);
         }
     }
 
-    return evidenceList;
+    return actualVerticalLines;
 }
 
-vector<MergedDivider> mergeVerticalEvidence(vector<VerticalLineEvidence> evidenceList) {
+vector<FinalVerticalLine> mergeActualVerticalLines(vector<ActualVerticalLine> actualVerticalLines) {
     sort(
-        evidenceList.begin(),
-        evidenceList.end(),
-        [](const VerticalLineEvidence& a, const VerticalLineEvidence& b) {
+        actualVerticalLines.begin(),
+        actualVerticalLines.end(),
+        [](const ActualVerticalLine& a, const ActualVerticalLine& b) {
             return a.x < b.x;
         }
     );
 
-    vector<MergedDivider> mergedDividers;
+    vector<FinalVerticalLine> finalVerticalLines;
 
     vector<int> currentXs;
     vector<int> currentTopYs;
     vector<int> currentBottomYs;
 
-    for (const VerticalLineEvidence& evidence : evidenceList) {
+    for (const ActualVerticalLine& actualLine : actualVerticalLines) {
         if (currentXs.empty()) {
-            currentXs.push_back(evidence.x);
-            currentTopYs.push_back(evidence.topY);
-            currentBottomYs.push_back(evidence.bottomY);
+            currentXs.push_back(actualLine.x);
+            currentTopYs.push_back(actualLine.topY);
+            currentBottomYs.push_back(actualLine.bottomY);
         }
         else {
             int currentMedianX = medianValue(currentXs);
 
-            if (abs(evidence.x - currentMedianX) <= MERGE_DISTANCE) {
-                currentXs.push_back(evidence.x);
-                currentTopYs.push_back(evidence.topY);
-                currentBottomYs.push_back(evidence.bottomY);
+            if (abs(actualLine.x - currentMedianX) <= MERGE_DISTANCE) {
+                currentXs.push_back(actualLine.x);
+                currentTopYs.push_back(actualLine.topY);
+                currentBottomYs.push_back(actualLine.bottomY);
             }
             else {
-                MergedDivider divider;
+                FinalVerticalLine finalLine;
 
-                divider.x = medianValue(currentXs);
-                divider.topY = *min_element(currentTopYs.begin(), currentTopYs.end());
-                divider.bottomY = *max_element(currentBottomYs.begin(), currentBottomYs.end());
+                // Median x keeps one weird line from pulling the divider sideways.
+                finalLine.x = medianValue(currentXs);
 
-                mergedDividers.push_back(divider);
+                // Min/max y makes the divider span the full detected height.
+                finalLine.topY = *min_element(currentTopYs.begin(), currentTopYs.end());
+                finalLine.bottomY = *max_element(currentBottomYs.begin(), currentBottomYs.end());
+
+                finalVerticalLines.push_back(finalLine);
 
                 currentXs.clear();
                 currentTopYs.clear();
                 currentBottomYs.clear();
 
-                currentXs.push_back(evidence.x);
-                currentTopYs.push_back(evidence.topY);
-                currentBottomYs.push_back(evidence.bottomY);
+                currentXs.push_back(actualLine.x);
+                currentTopYs.push_back(actualLine.topY);
+                currentBottomYs.push_back(actualLine.bottomY);
             }
         }
     }
 
     if (!currentXs.empty()) {
-        MergedDivider divider;
+        FinalVerticalLine finalLine;
 
-        divider.x = medianValue(currentXs);
-        divider.topY = *min_element(currentTopYs.begin(), currentTopYs.end());
-        divider.bottomY = *max_element(currentBottomYs.begin(), currentBottomYs.end());
+        finalLine.x = medianValue(currentXs);
+        finalLine.topY = *min_element(currentTopYs.begin(), currentTopYs.end());
+        finalLine.bottomY = *max_element(currentBottomYs.begin(), currentBottomYs.end());
 
-        mergedDividers.push_back(divider);
+        finalVerticalLines.push_back(finalLine);
     }
 
-    return mergedDividers;
+    return finalVerticalLines;
 }
 
-vector<MergedDivider> filterCloseDividers(
-    const vector<MergedDivider>& mergedDividers,
+vector<FinalVerticalLine> filterCloseVerticalLines(
+    const vector<FinalVerticalLine>& finalVerticalLines,
     int imageWidth
 ) {
-    vector<MergedDivider> filteredDividers;
+    vector<FinalVerticalLine> filteredVerticalLines;
 
     int minDividerSpacing =
         static_cast<int>(MIN_DIVIDER_SPACING_FACTOR * imageWidth);
 
-    for (const MergedDivider& divider : mergedDividers) {
-        if (filteredDividers.empty()) {
-            filteredDividers.push_back(divider);
+    for (const FinalVerticalLine& lineCandidate : finalVerticalLines) {
+        if (filteredVerticalLines.empty()) {
+            filteredVerticalLines.push_back(lineCandidate);
         }
         else {
-            MergedDivider& lastDivider = filteredDividers.back();
+            FinalVerticalLine& lastLine = filteredVerticalLines.back();
 
-            int distance = abs(divider.x - lastDivider.x);
+            int distance = abs(lineCandidate.x - lastLine.x);
 
             if (distance >= minDividerSpacing) {
-                filteredDividers.push_back(divider);
+                filteredVerticalLines.push_back(lineCandidate);
             }
             else {
-                int currentHeight = divider.bottomY - divider.topY;
-                int lastHeight = lastDivider.bottomY - lastDivider.topY;
+                int currentHeight = lineCandidate.bottomY - lineCandidate.topY;
+                int lastHeight = lastLine.bottomY - lastLine.topY;
 
                 if (currentHeight > lastHeight) {
-                    lastDivider = divider;
+                    lastLine = lineCandidate;
                 }
             }
         }
     }
 
-    return filteredDividers;
+    return filteredVerticalLines;
 }
 
-Mat drawMergedVerticalLines(
+Mat drawFinalVerticalLines(
     const Mat& img,
-    const vector<MergedDivider>& filteredDividers
+    const vector<FinalVerticalLine>& finalVerticalLines
 ) {
     Mat display = img.clone();
 
-    cout << endl << "Final vertical dividers:" << endl;
+    cout << endl << "Final vertical lines:" << endl;
 
-    for (const MergedDivider& divider : filteredDividers) {
-        cout << "vertical divider x = " << divider.x
-            << ", topY = " << divider.topY
-            << ", bottomY = " << divider.bottomY
+    for (const FinalVerticalLine& finalLine : finalVerticalLines) {
+        cout << "vertical line x = " << finalLine.x
+            << ", topY = " << finalLine.topY
+            << ", bottomY = " << finalLine.bottomY
             << endl;
 
         line(
             display,
-            Point(divider.x, divider.topY),
-            Point(divider.x, divider.bottomY),
+            Point(finalLine.x, finalLine.topY),
+            Point(finalLine.x, finalLine.bottomY),
             RED,
             LINE_THICKNESS
         );
 
-        circle(display, Point(divider.x, divider.topY), 4, BLUE, FILLED);
-        circle(display, Point(divider.x, divider.bottomY), 4, BLUE, FILLED);
+        circle(display, Point(finalLine.x, finalLine.topY), 4, BLUE, FILLED);
+        circle(display, Point(finalLine.x, finalLine.bottomY), 4, BLUE, FILLED);
     }
 
     return display;
@@ -405,11 +412,11 @@ bool isHorizontalLine(const Vec4i& lineSegment, int imageWidth) {
     return angleIsHorizontal && lineIsLongEnough;
 }
 
-vector<HorizontalLineEvidence> getHorizontalLineEvidence(
+vector<ActualHorizontalLine> getActualHorizontalLines(
     const vector<Vec4i>& lines,
     Mat& horizontalLineDisplay
 ) {
-    vector<HorizontalLineEvidence> evidenceList;
+    vector<ActualHorizontalLine> actualHorizontalLines;
 
     for (const Vec4i& l : lines) {
         if (isHorizontalLine(l, horizontalLineDisplay.cols)) {
@@ -430,16 +437,16 @@ vector<HorizontalLineEvidence> getHorizontalLineEvidence(
             int leftX = min(x1, x2);
             int rightX = max(x1, x2);
 
-            HorizontalLineEvidence evidence;
-            evidence.y = yAvg;
-            evidence.leftX = leftX;
-            evidence.rightX = rightX;
+            ActualHorizontalLine actualLine;
+            actualLine.y = yAvg;
+            actualLine.leftX = leftX;
+            actualLine.rightX = rightX;
 
-            evidenceList.push_back(evidence);
+            actualHorizontalLines.push_back(actualLine);
         }
     }
 
-    return evidenceList;
+    return actualHorizontalLines;
 }
 
 vector<Interval> mergeIntervals(vector<Interval> intervals) {
@@ -473,7 +480,7 @@ vector<Interval> mergeIntervals(vector<Interval> intervals) {
     return mergedIntervals;
 }
 
-MergedHorizontalDivider buildHorizontalDividerFromGroup(
+FinalHorizontalLine buildFinalHorizontalLineFromGroup(
     const vector<int>& ys,
     const vector<Interval>& intervals
 ) {
@@ -491,28 +498,28 @@ MergedHorizontalDivider buildHorizontalDividerFromGroup(
         }
     }
 
-    MergedHorizontalDivider divider;
-    divider.y = medianValue(ys);
-    divider.leftX = bestInterval.leftX;
-    divider.rightX = bestInterval.rightX;
-    divider.connectedCoverage = bestCoverage;
+    FinalHorizontalLine finalLine;
+    finalLine.y = medianValue(ys);
+    finalLine.leftX = bestInterval.leftX;
+    finalLine.rightX = bestInterval.rightX;
+    finalLine.connectedCoverage = bestCoverage;
 
-    return divider;
+    return finalLine;
 }
 
-vector<MergedHorizontalDivider> mergeHorizontalEvidence(
-    vector<HorizontalLineEvidence> evidenceList,
+vector<FinalHorizontalLine> mergeActualHorizontalLines(
+    vector<ActualHorizontalLine> actualHorizontalLines,
     int imageWidth
 ) {
     sort(
-        evidenceList.begin(),
-        evidenceList.end(),
-        [](const HorizontalLineEvidence& a, const HorizontalLineEvidence& b) {
+        actualHorizontalLines.begin(),
+        actualHorizontalLines.end(),
+        [](const ActualHorizontalLine& a, const ActualHorizontalLine& b) {
             return a.y < b.y;
         }
     );
 
-    vector<MergedHorizontalDivider> mergedDividers;
+    vector<FinalHorizontalLine> finalHorizontalLines;
 
     vector<int> currentYs;
     vector<Interval> currentIntervals;
@@ -520,76 +527,76 @@ vector<MergedHorizontalDivider> mergeHorizontalEvidence(
     int minConnectedCoverage =
         static_cast<int>(imageWidth * MIN_HORIZONTAL_CONNECTED_COVERAGE_FACTOR);
 
-    for (const HorizontalLineEvidence& evidence : evidenceList) {
+    for (const ActualHorizontalLine& actualLine : actualHorizontalLines) {
         Interval interval;
-        interval.leftX = evidence.leftX;
-        interval.rightX = evidence.rightX;
+        interval.leftX = actualLine.leftX;
+        interval.rightX = actualLine.rightX;
 
         if (currentYs.empty()) {
-            currentYs.push_back(evidence.y);
+            currentYs.push_back(actualLine.y);
             currentIntervals.push_back(interval);
         }
         else {
             int currentMedianY = medianValue(currentYs);
 
-            if (abs(evidence.y - currentMedianY) <= HORIZONTAL_MERGE_DISTANCE) {
-                currentYs.push_back(evidence.y);
+            if (abs(actualLine.y - currentMedianY) <= HORIZONTAL_MERGE_DISTANCE) {
+                currentYs.push_back(actualLine.y);
                 currentIntervals.push_back(interval);
             }
             else {
-                MergedHorizontalDivider divider =
-                    buildHorizontalDividerFromGroup(currentYs, currentIntervals);
+                FinalHorizontalLine finalLine =
+                    buildFinalHorizontalLineFromGroup(currentYs, currentIntervals);
 
-                if (divider.connectedCoverage >= minConnectedCoverage) {
-                    mergedDividers.push_back(divider);
+                if (finalLine.connectedCoverage >= minConnectedCoverage) {
+                    finalHorizontalLines.push_back(finalLine);
                 }
 
                 currentYs.clear();
                 currentIntervals.clear();
 
-                currentYs.push_back(evidence.y);
+                currentYs.push_back(actualLine.y);
                 currentIntervals.push_back(interval);
             }
         }
     }
 
     if (!currentYs.empty()) {
-        MergedHorizontalDivider divider =
-            buildHorizontalDividerFromGroup(currentYs, currentIntervals);
+        FinalHorizontalLine finalLine =
+            buildFinalHorizontalLineFromGroup(currentYs, currentIntervals);
 
-        if (divider.connectedCoverage >= minConnectedCoverage) {
-            mergedDividers.push_back(divider);
+        if (finalLine.connectedCoverage >= minConnectedCoverage) {
+            finalHorizontalLines.push_back(finalLine);
         }
     }
 
-    return mergedDividers;
+    return finalHorizontalLines;
 }
 
-Mat drawMergedHorizontalLines(
+Mat drawFinalHorizontalLines(
     const Mat& img,
-    const vector<MergedHorizontalDivider>& horizontalDividers
+    const vector<FinalHorizontalLine>& finalHorizontalLines
 ) {
     Mat display = img.clone();
 
-    cout << endl << "Final horizontal dividers:" << endl;
+    cout << endl << "Final horizontal lines:" << endl;
 
-    for (const MergedHorizontalDivider& divider : horizontalDividers) {
-        cout << "horizontal divider y = " << divider.y
-            << ", leftX = " << divider.leftX
-            << ", rightX = " << divider.rightX
-            << ", connectedCoverage = " << divider.connectedCoverage
+    for (const FinalHorizontalLine& finalLine : finalHorizontalLines) {
+        cout << "horizontal line y = " << finalLine.y
+            << ", leftX = " << finalLine.leftX
+            << ", rightX = " << finalLine.rightX
+            << ", connectedCoverage = " << finalLine.connectedCoverage
             << endl;
 
         line(
             display,
-            Point(divider.leftX, divider.y),
-            Point(divider.rightX, divider.y),
+            Point(finalLine.leftX, finalLine.y),
+            Point(finalLine.rightX, finalLine.y),
             BLUE,
             LINE_THICKNESS
         );
 
-        circle(display, Point(divider.leftX, divider.y), 4, GREEN, FILLED);
-        circle(display, Point(divider.rightX, divider.y), 4, GREEN, FILLED);
+        circle(display, Point(finalLine.leftX, finalLine.y), 4, GREEN, FILLED);
+        circle(display, Point(finalLine.rightX, finalLine.y), 4, GREEN, FILLED);
     }
 
     return display;
@@ -621,44 +628,44 @@ int main() {
     imshow("Edges", edges);
     waitKey(0);
 
-    vector<Vec4i> verticalLines =
+    vector<Vec4i> verticalHoughLines =
         getHoughLines(edges, VERTICAL_HOUGH_PARAMS);
 
-    vector<Vec4i> horizontalLines =
+    vector<Vec4i> horizontalHoughLines =
         getHoughLines(edges, HORIZONTAL_HOUGH_PARAMS);
 
     // -----------------------------
     // Vertical divider detection
     // -----------------------------
 
-    Mat verticalLineDisplay = img.clone();
+    Mat actualVerticalLineDisplay = img.clone();
 
-    vector<VerticalLineEvidence> verticalEvidence =
-        getVerticalLineEvidence(verticalLines, verticalLineDisplay);
+    vector<ActualVerticalLine> actualVerticalLines =
+        getActualVerticalLines(verticalHoughLines, actualVerticalLineDisplay);
 
-    vector<MergedDivider> mergedVerticalDividers =
-        mergeVerticalEvidence(verticalEvidence);
+    vector<FinalVerticalLine> mergedVerticalLines =
+        mergeActualVerticalLines(actualVerticalLines);
 
-    vector<MergedDivider> filteredVerticalDividers =
-        filterCloseDividers(mergedVerticalDividers, img.cols);
+    vector<FinalVerticalLine> finalVerticalLines =
+        filterCloseVerticalLines(mergedVerticalLines, img.cols);
 
-    Mat mergedVerticalDisplay =
-        drawMergedVerticalLines(img, filteredVerticalDividers);
+    Mat finalVerticalLineDisplay =
+        drawFinalVerticalLines(img, finalVerticalLines);
 
     // -----------------------------
     // Horizontal divider detection
     // -----------------------------
 
-    Mat horizontalLineDisplay = img.clone();
+    Mat actualHorizontalLineDisplay = img.clone();
 
-    vector<HorizontalLineEvidence> horizontalEvidence =
-        getHorizontalLineEvidence(horizontalLines, horizontalLineDisplay);
+    vector<ActualHorizontalLine> actualHorizontalLines =
+        getActualHorizontalLines(horizontalHoughLines, actualHorizontalLineDisplay);
 
-    vector<MergedHorizontalDivider> mergedHorizontalDividers =
-        mergeHorizontalEvidence(horizontalEvidence, img.cols);
+    vector<FinalHorizontalLine> finalHorizontalLines =
+        mergeActualHorizontalLines(actualHorizontalLines, img.cols);
 
-    Mat mergedHorizontalDisplay =
-        drawMergedHorizontalLines(img, mergedHorizontalDividers);
+    Mat finalHorizontalLineDisplay =
+        drawFinalHorizontalLines(img, finalHorizontalLines);
 
     // -----------------------------
     // Combined debug display
@@ -666,21 +673,21 @@ int main() {
 
     Mat combinedDisplay = img.clone();
 
-    for (const MergedDivider& divider : filteredVerticalDividers) {
+    for (const FinalVerticalLine& finalLine : finalVerticalLines) {
         line(
             combinedDisplay,
-            Point(divider.x, divider.topY),
-            Point(divider.x, divider.bottomY),
+            Point(finalLine.x, finalLine.topY),
+            Point(finalLine.x, finalLine.bottomY),
             RED,
             LINE_THICKNESS
         );
     }
 
-    for (const MergedHorizontalDivider& divider : mergedHorizontalDividers) {
+    for (const FinalHorizontalLine& finalLine : finalHorizontalLines) {
         line(
             combinedDisplay,
-            Point(divider.leftX, divider.y),
-            Point(divider.rightX, divider.y),
+            Point(finalLine.leftX, finalLine.y),
+            Point(finalLine.rightX, finalLine.y),
             BLUE,
             LINE_THICKNESS
         );
@@ -692,10 +699,10 @@ int main() {
 
     imshow("Original", img);
     imshow("Edges", edges);
-    imshow("Vertical Lines", verticalLineDisplay);
-    imshow("Merged Vertical Lines", mergedVerticalDisplay);
-    imshow("Horizontal Lines", horizontalLineDisplay);
-    imshow("Merged Horizontal Lines", mergedHorizontalDisplay);
+    imshow("Actual Vertical Lines", actualVerticalLineDisplay);
+    imshow("Final Vertical Lines", finalVerticalLineDisplay);
+    imshow("Actual Horizontal Lines", actualHorizontalLineDisplay);
+    imshow("Final Horizontal Lines", finalHorizontalLineDisplay);
     imshow("Combined Dividers", combinedDisplay);
 
     waitKey(0);
