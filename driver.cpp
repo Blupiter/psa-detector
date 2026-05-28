@@ -56,18 +56,24 @@ const int MERGE_DISTANCE = 12;
 const int HORIZONTAL_MERGE_DISTANCE = 12;
 const double MIN_DIVIDER_SPACING_FACTOR = 0.06;
 
+// Occupied detection
+const double OCCUPIED_EDGE_DENSITY_THRESHOLD = 0.001;
+const double PARKING_LOCATION_BLUR = 13;
+
 // Drawing
 const Scalar RED = Scalar(0, 0, 255);
 const Scalar BLUE = Scalar(255, 0, 0);
 const Scalar GREEN = Scalar(0, 255, 0);
 const int LINE_THICKNESS = 2;
 
-// --------------------------------------------------
 // Structs
-// --------------------------------------------------
 
 typedef struct ParkingSpot {
-
+    int id;
+    Rect box;
+    string rowName;
+    bool occupied;
+    double occupiedScore;
 } ParkingSpot;
 
 typedef struct HoughParams {
@@ -122,9 +128,7 @@ typedef struct FinalHorizontalLine {
     int connectedCoverage;
 } FinalHorizontalLine;
 
-// --------------------------------------------------
 // Utility functions
-// --------------------------------------------------
 
 int medianValue(vector<int> values) {
     if (values.empty()) {
@@ -168,9 +172,7 @@ double getLineAngleDegrees(const Vec4i& lineSegment) {
     return fabs(angle);
 }
 
-// --------------------------------------------------
 // Image preprocessing
-// --------------------------------------------------
 
 Mat getEdges(const Mat& img) {
     Mat gray, blurred, edges;
@@ -210,9 +212,7 @@ vector<Vec4i> getHoughLines(const Mat& edges, HoughParams params) {
     return lines;
 }
 
-// --------------------------------------------------
 // Vertical divider detection
-// --------------------------------------------------
 
 bool isVerticalLine(const Vec4i& lineSegment, int imageHeight) {
     double length = getLineLength(lineSegment);
@@ -394,9 +394,7 @@ Mat drawFinalVerticalLines(
     return display;
 }
 
-// --------------------------------------------------
 // Horizontal divider detection
-// --------------------------------------------------
 
 bool isHorizontalLine(const Vec4i& lineSegment, int imageWidth) {
     double length = getLineLength(lineSegment);
@@ -602,17 +600,213 @@ Mat drawFinalHorizontalLines(
     return display;
 }
 
-// --------------------------------------------------
-// Placeholder
-// --------------------------------------------------
+vector<ParkingSpot> getParkingSpotLocations(
+    const vector<FinalVerticalLine>& finalVerticalLines,
+    const vector<FinalHorizontalLine>& finalHorizontalLines,
+    const Mat& img
+) {
+    vector<ParkingSpot> spots;
 
-vector<ParkingSpot> getParkingSpotLocations(Mat img) {
-    return {};
+    if (finalVerticalLines.size() < 2) {
+        return spots;
+    }
+
+    vector<FinalVerticalLine> verticalLines = finalVerticalLines;
+
+    sort(
+        verticalLines.begin(),
+        verticalLines.end(),
+        [](const FinalVerticalLine& a, const FinalVerticalLine& b) {
+            return a.x < b.x;
+        }
+    );
+
+    // If we have no horizontal divider, we cannot confidently split top/bottom rows yet.
+    if (finalHorizontalLines.empty()) {
+        cout << "No horizontal divider found, so no parking spots generated yet." << endl;
+        return spots;
+    }
+
+    // Pick the strongest horizontal divider.
+    // Right now that means the one with the largest connected coverage.
+    FinalHorizontalLine rowDivider = finalHorizontalLines[0];
+
+    for (const FinalHorizontalLine& line : finalHorizontalLines) {
+        if (line.connectedCoverage > rowDivider.connectedCoverage) {
+            rowDivider = line;
+        }
+    }
+
+    int dividerY = rowDivider.y;
+
+    // Use only vertical dividers that cross the horizontal row divider.
+    vector<FinalVerticalLine> usableVerticalLines;
+
+    for (const FinalVerticalLine& verticalLine : verticalLines) {
+        bool xInsideHorizontalSpan =
+            verticalLine.x >= rowDivider.leftX &&
+            verticalLine.x <= rowDivider.rightX;
+
+        bool crossesDividerY =
+            verticalLine.topY <= dividerY &&
+            verticalLine.bottomY >= dividerY;
+
+        if (xInsideHorizontalSpan && crossesDividerY) {
+            usableVerticalLines.push_back(verticalLine);
+        }
+    }
+
+    if (usableVerticalLines.size() < 2) {
+        cout << "Not enough usable vertical dividers to generate spots." << endl;
+        return spots;
+    }
+
+    vector<int> topYs;
+    vector<int> bottomYs;
+
+    for (const FinalVerticalLine& verticalLine : usableVerticalLines) {
+        topYs.push_back(verticalLine.topY);
+        bottomYs.push_back(verticalLine.bottomY);
+    }
+
+    // Use median so one weird divider endpoint does not distort the whole row.
+    int rowTopY = medianValue(topYs);
+    int rowBottomY = medianValue(bottomYs);
+
+    int insetX = 4;
+    int insetY = 4;
+
+    int id = 0;
+
+    for (int i = 0; i < static_cast<int>(usableVerticalLines.size()) - 1; i++) {
+        int leftX = usableVerticalLines[i].x;
+        int rightX = usableVerticalLines[i + 1].x;
+
+        int width = rightX - leftX;
+
+        if (width <= 0) {
+            continue;
+        }
+
+        // Top row spot
+        Rect topSpotBox(
+            leftX + insetX,
+            rowTopY + insetY,
+            width - 2 * insetX,
+            dividerY - rowTopY - 2 * insetY
+        );
+
+        if (topSpotBox.width > 10 && topSpotBox.height > 10) {
+            ParkingSpot spot;
+            spot.id = id++;
+            spot.box = topSpotBox;
+            spot.rowName = "top";
+            spot.occupied = false;
+            spot.occupiedScore = 0.0;
+
+            spots.push_back(spot);
+        }
+
+        // Bottom row spot
+        Rect bottomSpotBox(
+            leftX + insetX,
+            dividerY + insetY,
+            width - 2 * insetX,
+            rowBottomY - dividerY - 2 * insetY
+        );
+
+        if (bottomSpotBox.width > 10 && bottomSpotBox.height > 10) {
+            ParkingSpot spot;
+            spot.id = id++;
+            spot.box = bottomSpotBox;
+            spot.rowName = "bottom";
+            spot.occupied = false;
+            spot.occupiedScore = 0.0;
+
+            spots.push_back(spot);
+        }
+    }
+
+    return spots;
 }
 
-// --------------------------------------------------
+Mat drawParkingSpots(const Mat& img, const vector<ParkingSpot>& parkingSpots) {
+    Mat display = img.clone();
+
+    for (const ParkingSpot& spot : parkingSpots) {
+        Scalar color = spot.occupied ? RED : GREEN;
+        string label = spot.occupied ? "Occ" : "Empty";
+
+        rectangle(
+            display,
+            spot.box,
+            color,
+            LINE_THICKNESS
+        );
+
+        putText(
+            display,
+            label + " " + to_string(spot.id),
+            Point(spot.box.x + 5, spot.box.y + 20),
+            FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1
+        );
+    }
+
+    return display;
+}
+
+double computeEdgeDensityInSpot(const Mat& img, const Rect& spotBox) {
+    Rect safeBox = spotBox & Rect(0, 0, img.cols, img.rows);
+
+    if (safeBox.width <= 0 || safeBox.height <= 0) {
+        return 0.0;
+    }
+
+    Mat roi = img(safeBox);
+
+    Mat gray, blurred, edges;
+
+    cvtColor(roi, gray, COLOR_BGR2GRAY);
+
+    GaussianBlur(
+        gray,
+        blurred,
+        Size(PARKING_LOCATION_BLUR, PARKING_LOCATION_BLUR),
+        0
+    );
+
+    Canny(
+        blurred,
+        edges,
+        CANNY_LOW_THRESHOLD,
+        CANNY_HIGH_THRESHOLD
+    );
+
+    double edgePixels = countNonZero(edges);
+    double totalPixels = edges.rows * edges.cols;
+
+    return edgePixels / totalPixels;
+}
+
+void classifyParkingSpots(Mat img, vector<ParkingSpot>& parkingSpots) {
+    for (ParkingSpot& spot : parkingSpots) {
+        double score = computeEdgeDensityInSpot(img, spot.box);
+
+        spot.occupiedScore = score;
+        spot.occupied = score > OCCUPIED_EDGE_DENSITY_THRESHOLD;
+
+        cout << "spot " << spot.id
+            << ", row = " << spot.rowName
+            << ", score = " << spot.occupiedScore
+            << ", occupied = " << spot.occupied
+            << endl;
+    }
+}
+
 // Main
-// --------------------------------------------------
 
 int main() {
     Mat img = imread(IMAGE_PATH);
@@ -634,9 +828,7 @@ int main() {
     vector<Vec4i> horizontalHoughLines =
         getHoughLines(edges, HORIZONTAL_HOUGH_PARAMS);
 
-    // -----------------------------
     // Vertical divider detection
-    // -----------------------------
 
     Mat actualVerticalLineDisplay = img.clone();
 
@@ -652,9 +844,7 @@ int main() {
     Mat finalVerticalLineDisplay =
         drawFinalVerticalLines(img, finalVerticalLines);
 
-    // -----------------------------
     // Horizontal divider detection
-    // -----------------------------
 
     Mat actualHorizontalLineDisplay = img.clone();
 
@@ -667,9 +857,15 @@ int main() {
     Mat finalHorizontalLineDisplay =
         drawFinalHorizontalLines(img, finalHorizontalLines);
 
-    // -----------------------------
+    vector<ParkingSpot> parkingSpots =
+        getParkingSpotLocations(finalVerticalLines, finalHorizontalLines, img);
+
+    classifyParkingSpots(img, parkingSpots);
+
+    Mat parkingSpotDisplay =
+        drawParkingSpots(img, parkingSpots);
+
     // Combined debug display
-    // -----------------------------
 
     Mat combinedDisplay = img.clone();
 
@@ -693,17 +889,20 @@ int main() {
         );
     }
 
-    // -----------------------------
     // Show results
-    // -----------------------------
 
     imshow("Original", img);
     imshow("Edges", edges);
+    waitKey(0);
     imshow("Actual Vertical Lines", actualVerticalLineDisplay);
     imshow("Final Vertical Lines", finalVerticalLineDisplay);
+    waitKey(0);
     imshow("Actual Horizontal Lines", actualHorizontalLineDisplay);
     imshow("Final Horizontal Lines", finalHorizontalLineDisplay);
+    waitKey(0);
     imshow("Combined Dividers", combinedDisplay);
+    waitKey(0);
+    imshow("Parking Spots", parkingSpotDisplay);
 
     waitKey(0);
 
