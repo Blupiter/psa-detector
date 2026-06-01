@@ -12,11 +12,9 @@
 using namespace cv;
 using namespace std;
 
-// --------------------------------------------------
 // Parameters
-// --------------------------------------------------
 
-const string IMAGE_PATH = "test1.jpg";
+const string IMAGE_PATH = "test2.jpg";
 
 // Canny edge detection
 const int CANNY_LOW_THRESHOLD = 100;
@@ -48,7 +46,7 @@ const double MAX_HORIZONTAL_ANGLE = 3.0;
 const double MIN_HORIZONTAL_SEGMENT_LENGTH_FACTOR = 0.05;
 
 // Horizontal connected coverage filtering
-const int HORIZONTAL_INTERVAL_GAP = 25;
+const int HORIZONTAL_INTERVAL_GAP = 55;
 const double MIN_HORIZONTAL_CONNECTED_COVERAGE_FACTOR = 0.65;
 
 // Position merging
@@ -58,7 +56,7 @@ const double MIN_DIVIDER_SPACING_FACTOR = 0.06;
 
 // Occupied detection
 const double OCCUPIED_EDGE_DENSITY_THRESHOLD = 0.001;
-const double PARKING_LOCATION_BLUR = 13;
+const double PARKING_LOCATION_BLUR = 13; // use between 9 and 13
 
 // Drawing
 const Scalar RED = Scalar(0, 0, 255);
