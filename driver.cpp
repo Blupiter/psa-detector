@@ -1,4 +1,12 @@
-// driver.cpp
+/*
+    Parking Lot Availability Detector (PSAD)
+    Authors: Bryant Lund, Nate McNulty
+
+    Usage: set IMAGE_PATH to the name of the test image ("testX.jpg")
+    and press run in Visual Studio.
+    Keep pressing any key to see the steps the program takes to produce the final output
+    (Originally a debugging strategy, but cool to see in the final submission)
+*/
 
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -14,7 +22,7 @@ using namespace std;
 
 // Parameters
 
-const string IMAGE_PATH = "test2.jpg";
+const string IMAGE_PATH = "test1.jpg";
 
 // Canny edge detection
 const int CANNY_LOW_THRESHOLD = 100;
@@ -26,12 +34,13 @@ const int HOUGH_RHO = 1;
 const double HOUGH_THETA = CV_PI / 180;
 
 // Vertical Hough settings
+// These can be more permissive now because final filtering uses connected vertical coverage.
 const int VERTICAL_HOUGH_THRESHOLD = 15;
-const int VERTICAL_HOUGH_MIN_LINE_LENGTH = 35;
-const int VERTICAL_HOUGH_MAX_LINE_GAP = 50;
+const int VERTICAL_HOUGH_MIN_LINE_LENGTH = 20;
+const int VERTICAL_HOUGH_MAX_LINE_GAP = 35;
 
 // Horizontal Hough settings
-// These can be permissive because final filtering is based on connected coverage.
+// These can be permissive because final filtering is based on connected horizontal coverage.
 const int HORIZONTAL_HOUGH_THRESHOLD = 20;
 const int HORIZONTAL_HOUGH_MIN_LINE_LENGTH = 20;
 const int HORIZONTAL_HOUGH_MAX_LINE_GAP = 15;
@@ -39,7 +48,11 @@ const int HORIZONTAL_HOUGH_MAX_LINE_GAP = 15;
 // Vertical line filtering
 const double MIN_VERTICAL_ANGLE = 85.0;
 const double MAX_VERTICAL_ANGLE = 95.0;
-const double MIN_VERTICAL_LINE_LENGTH_FACTOR = 0.42;
+const double MIN_VERTICAL_SEGMENT_LENGTH_FACTOR = 0.05;
+
+// Vertical connected coverage filtering
+const int VERTICAL_INTERVAL_GAP = 25;
+const double MIN_VERTICAL_CONNECTED_COVERAGE_FACTOR = 0.55;
 
 // Horizontal line filtering
 const double MAX_HORIZONTAL_ANGLE = 3.0;
@@ -50,13 +63,13 @@ const int HORIZONTAL_INTERVAL_GAP = 55;
 const double MIN_HORIZONTAL_CONNECTED_COVERAGE_FACTOR = 0.65;
 
 // Position merging
-const int MERGE_DISTANCE = 12;
+const int MERGE_DISTANCE = 4;
 const int HORIZONTAL_MERGE_DISTANCE = 12;
 const double MIN_DIVIDER_SPACING_FACTOR = 0.06;
 
 // Occupied detection
 const double OCCUPIED_EDGE_DENSITY_THRESHOLD = 0.001;
-const double PARKING_LOCATION_BLUR = 13; // use between 9 and 13
+const int PARKING_LOCATION_BLUR = 9;
 
 // Drawing
 const Scalar RED = Scalar(0, 0, 255);
@@ -104,6 +117,7 @@ typedef struct FinalVerticalLine {
     int x;
     int topY;
     int bottomY;
+    int connectedCoverage;
 } FinalVerticalLine;
 
 // A real/raw horizontal line segment found by Hough.
@@ -113,10 +127,15 @@ typedef struct ActualHorizontalLine {
     int rightX;
 } ActualHorizontalLine;
 
-typedef struct Interval {
+typedef struct HorizontalInterval {
     int leftX;
     int rightX;
-} Interval;
+} HorizontalInterval;
+
+typedef struct VerticalInterval {
+    int topY;
+    int bottomY;
+} VerticalInterval;
 
 // A final/merged horizontal parking-row divider.
 typedef struct FinalHorizontalLine {
@@ -128,6 +147,10 @@ typedef struct FinalHorizontalLine {
 
 // Utility functions
 
+/*
+    Returns median value from list of values
+    Used when merging line fragments into a final position
+*/
 int medianValue(vector<int> values) {
     if (values.empty()) {
         return 0;
@@ -144,6 +167,9 @@ int medianValue(vector<int> values) {
     return (values[middle - 1] + values[middle]) / 2;
 }
 
+/* 
+    Computes the Euclidean length of a line segment stored as x1, y1, x2, y2
+*/
 double getLineLength(const Vec4i& lineSegment) {
     int x1 = lineSegment[0];
     int y1 = lineSegment[1];
@@ -156,6 +182,10 @@ double getLineLength(const Vec4i& lineSegment) {
     return sqrt(dx * dx + dy * dy);
 }
 
+/*
+    Computes absolute angle of a Hough line segment in degrees
+    Used to decide whether an angle is mostly vertical/horizontal
+*/
 double getLineAngleDegrees(const Vec4i& lineSegment) {
     int x1 = lineSegment[0];
     int y1 = lineSegment[1];
@@ -172,6 +202,10 @@ double getLineAngleDegrees(const Vec4i& lineSegment) {
 
 // Image preprocessing
 
+/*
+    Converts the input image to grayscale, blurs it, and does Canny edge detection
+    The output is used for Hough line detection
+*/
 Mat getEdges(const Mat& img) {
     Mat gray, blurred, edges;
 
@@ -194,6 +228,10 @@ Mat getEdges(const Mat& img) {
     return edges;
 }
 
+/*
+    Runs Hough transform on edge image to get possible lines
+    Takes in Hough parameter object so vertical and horizontal lines can use different configs
+*/
 vector<Vec4i> getHoughLines(const Mat& edges, HoughParams params) {
     vector<Vec4i> lines;
 
@@ -212,6 +250,10 @@ vector<Vec4i> getHoughLines(const Mat& edges, HoughParams params) {
 
 // Vertical divider detection
 
+/*
+    Checks whether a Hough segment is vertical and long enough
+    to be considered a parking divider fragment
+*/
 bool isVerticalLine(const Vec4i& lineSegment, int imageHeight) {
     double length = getLineLength(lineSegment);
     double angle = getLineAngleDegrees(lineSegment);
@@ -221,11 +263,16 @@ bool isVerticalLine(const Vec4i& lineSegment, int imageHeight) {
         angle < MAX_VERTICAL_ANGLE;
 
     bool lineIsLongEnough =
-        length > (imageHeight * MIN_VERTICAL_LINE_LENGTH_FACTOR);
+        length > (imageHeight * MIN_VERTICAL_SEGMENT_LENGTH_FACTOR);
 
     return angleIsVertical && lineIsLongEnough;
 }
 
+/*
+    Filters raw Hough segments into candidates for vertical dividers
+    Stores segments as ActualVerticalLine objects with x, topY, and bottomY
+    Draws the line for debugging
+*/
 vector<ActualVerticalLine> getActualVerticalLines(
     const vector<Vec4i>& lines,
     Mat& verticalLineDisplay
@@ -263,7 +310,80 @@ vector<ActualVerticalLine> getActualVerticalLines(
     return actualVerticalLines;
 }
 
-vector<FinalVerticalLine> mergeActualVerticalLines(vector<ActualVerticalLine> actualVerticalLines) {
+/*
+    Takes in y-intervals from broken line segments and merges them into longer intervals
+    if they are likely to be part of the same line
+*/
+vector<VerticalInterval> mergeVerticalIntervals(vector<VerticalInterval> intervals) {
+    if (intervals.empty()) {
+        return {};
+    }
+
+    sort(
+        intervals.begin(),
+        intervals.end(),
+        [](const VerticalInterval& a, const VerticalInterval& b) {
+            return a.topY < b.topY;
+        }
+    );
+
+    vector<VerticalInterval> mergedIntervals;
+    mergedIntervals.push_back(intervals[0]);
+
+    for (int i = 1; i < static_cast<int>(intervals.size()); i++) {
+        VerticalInterval& last = mergedIntervals.back();
+        VerticalInterval current = intervals[i];
+
+        if (current.topY <= last.bottomY + VERTICAL_INTERVAL_GAP) {
+            last.bottomY = max(last.bottomY, current.bottomY);
+        }
+        else {
+            mergedIntervals.push_back(current);
+        }
+    }
+
+    return mergedIntervals;
+}
+
+
+/*
+    Builds a final vertical devider from a group of vertical fragments
+    Uses the median x-position and the longest connected vertical interval
+*/
+FinalVerticalLine buildFinalVerticalLineFromGroup(
+    const vector<int>& xs,
+    const vector<VerticalInterval>& intervals
+) {
+    vector<VerticalInterval> mergedIntervals = mergeVerticalIntervals(intervals);
+
+    VerticalInterval bestInterval = mergedIntervals[0];
+    int bestCoverage = bestInterval.bottomY - bestInterval.topY;
+
+    for (const VerticalInterval& interval : mergedIntervals) {
+        int coverage = interval.bottomY - interval.topY;
+
+        if (coverage > bestCoverage) {
+            bestCoverage = coverage;
+            bestInterval = interval;
+        }
+    }
+
+    FinalVerticalLine finalLine;
+    finalLine.x = medianValue(xs);
+    finalLine.topY = bestInterval.topY;
+    finalLine.bottomY = bestInterval.bottomY;
+    finalLine.connectedCoverage = bestCoverage;
+
+    return finalLine;
+}
+
+/*
+    Groups ActualVerticalLines (segments) into FinalVerticalLines (continous lines)
+*/
+vector<FinalVerticalLine> mergeActualVerticalLines(
+    vector<ActualVerticalLine> actualVerticalLines,
+    int imageHeight
+) {
     sort(
         actualVerticalLines.begin(),
         actualVerticalLines.end(),
@@ -275,59 +395,60 @@ vector<FinalVerticalLine> mergeActualVerticalLines(vector<ActualVerticalLine> ac
     vector<FinalVerticalLine> finalVerticalLines;
 
     vector<int> currentXs;
-    vector<int> currentTopYs;
-    vector<int> currentBottomYs;
+    vector<VerticalInterval> currentIntervals;
+
+    int minConnectedCoverage =
+        static_cast<int>(imageHeight * MIN_VERTICAL_CONNECTED_COVERAGE_FACTOR);
 
     for (const ActualVerticalLine& actualLine : actualVerticalLines) {
+        VerticalInterval interval;
+        interval.topY = actualLine.topY;
+        interval.bottomY = actualLine.bottomY;
+
         if (currentXs.empty()) {
             currentXs.push_back(actualLine.x);
-            currentTopYs.push_back(actualLine.topY);
-            currentBottomYs.push_back(actualLine.bottomY);
+            currentIntervals.push_back(interval);
         }
         else {
             int currentMedianX = medianValue(currentXs);
 
             if (abs(actualLine.x - currentMedianX) <= MERGE_DISTANCE) {
                 currentXs.push_back(actualLine.x);
-                currentTopYs.push_back(actualLine.topY);
-                currentBottomYs.push_back(actualLine.bottomY);
+                currentIntervals.push_back(interval);
             }
             else {
-                FinalVerticalLine finalLine;
+                FinalVerticalLine finalLine =
+                    buildFinalVerticalLineFromGroup(currentXs, currentIntervals);
 
-                // Median x keeps one weird line from pulling the divider sideways.
-                finalLine.x = medianValue(currentXs);
-
-                // Min/max y makes the divider span the full detected height.
-                finalLine.topY = *min_element(currentTopYs.begin(), currentTopYs.end());
-                finalLine.bottomY = *max_element(currentBottomYs.begin(), currentBottomYs.end());
-
-                finalVerticalLines.push_back(finalLine);
+                if (finalLine.connectedCoverage >= minConnectedCoverage) {
+                    finalVerticalLines.push_back(finalLine);
+                }
 
                 currentXs.clear();
-                currentTopYs.clear();
-                currentBottomYs.clear();
+                currentIntervals.clear();
 
                 currentXs.push_back(actualLine.x);
-                currentTopYs.push_back(actualLine.topY);
-                currentBottomYs.push_back(actualLine.bottomY);
+                currentIntervals.push_back(interval);
             }
         }
     }
 
     if (!currentXs.empty()) {
-        FinalVerticalLine finalLine;
+        FinalVerticalLine finalLine =
+            buildFinalVerticalLineFromGroup(currentXs, currentIntervals);
 
-        finalLine.x = medianValue(currentXs);
-        finalLine.topY = *min_element(currentTopYs.begin(), currentTopYs.end());
-        finalLine.bottomY = *max_element(currentBottomYs.begin(), currentBottomYs.end());
-
-        finalVerticalLines.push_back(finalLine);
+        if (finalLine.connectedCoverage >= minConnectedCoverage) {
+            finalVerticalLines.push_back(finalLine);
+        }
     }
 
     return finalVerticalLines;
 }
 
+/*
+    Removes final vertical line candidtaes that are unrealistically close together
+    If two candidates are too close, keep the one with stronger connected coverage
+*/
 vector<FinalVerticalLine> filterCloseVerticalLines(
     const vector<FinalVerticalLine>& finalVerticalLines,
     int imageWidth
@@ -350,10 +471,10 @@ vector<FinalVerticalLine> filterCloseVerticalLines(
                 filteredVerticalLines.push_back(lineCandidate);
             }
             else {
-                int currentHeight = lineCandidate.bottomY - lineCandidate.topY;
-                int lastHeight = lastLine.bottomY - lastLine.topY;
+                int currentCoverage = lineCandidate.connectedCoverage;
+                int lastCoverage = lastLine.connectedCoverage;
 
-                if (currentHeight > lastHeight) {
+                if (currentCoverage > lastCoverage) {
                     lastLine = lineCandidate;
                 }
             }
@@ -363,6 +484,10 @@ vector<FinalVerticalLine> filterCloseVerticalLines(
     return filteredVerticalLines;
 }
 
+/*
+    Draws final vertical dividers onto the image
+    Marks their top and bottom endpoints for debugging purposes
+*/
 Mat drawFinalVerticalLines(
     const Mat& img,
     const vector<FinalVerticalLine>& finalVerticalLines
@@ -375,6 +500,7 @@ Mat drawFinalVerticalLines(
         cout << "vertical line x = " << finalLine.x
             << ", topY = " << finalLine.topY
             << ", bottomY = " << finalLine.bottomY
+            << ", connectedCoverage = " << finalLine.connectedCoverage
             << endl;
 
         line(
@@ -394,6 +520,10 @@ Mat drawFinalVerticalLines(
 
 // Horizontal divider detection
 
+/*
+    Checks whether a Hough line segment is horizontal and long enough
+    to be a considered a possible horizontal parking row divider fragment
+*/
 bool isHorizontalLine(const Vec4i& lineSegment, int imageWidth) {
     double length = getLineLength(lineSegment);
     double angle = getLineAngleDegrees(lineSegment);
@@ -408,6 +538,11 @@ bool isHorizontalLine(const Vec4i& lineSegment, int imageWidth) {
     return angleIsHorizontal && lineIsLongEnough;
 }
 
+/*
+    Filters raw Hough lines down to horizontal candidates
+    Stores each accepted segment as an ActualHorizontalLine with y, leftX, and rightX
+    Draws the horizontal segments for debugging purposes
+*/
 vector<ActualHorizontalLine> getActualHorizontalLines(
     const vector<Vec4i>& lines,
     Mat& horizontalLineDisplay
@@ -445,7 +580,11 @@ vector<ActualHorizontalLine> getActualHorizontalLines(
     return actualHorizontalLines;
 }
 
-vector<Interval> mergeIntervals(vector<Interval> intervals) {
+/*
+    Takes in x-intervals from broken line segments and merges them into longer intervals
+    if they are likely to be part of the same line
+*/
+vector<HorizontalInterval> mergeHorizontalIntervals(vector<HorizontalInterval> intervals) {
     if (intervals.empty()) {
         return {};
     }
@@ -453,17 +592,17 @@ vector<Interval> mergeIntervals(vector<Interval> intervals) {
     sort(
         intervals.begin(),
         intervals.end(),
-        [](const Interval& a, const Interval& b) {
+        [](const HorizontalInterval& a, const HorizontalInterval& b) {
             return a.leftX < b.leftX;
         }
     );
 
-    vector<Interval> mergedIntervals;
+    vector<HorizontalInterval> mergedIntervals;
     mergedIntervals.push_back(intervals[0]);
 
     for (int i = 1; i < static_cast<int>(intervals.size()); i++) {
-        Interval& last = mergedIntervals.back();
-        Interval current = intervals[i];
+        HorizontalInterval& last = mergedIntervals.back();
+        HorizontalInterval current = intervals[i];
 
         if (current.leftX <= last.rightX + HORIZONTAL_INTERVAL_GAP) {
             last.rightX = max(last.rightX, current.rightX);
@@ -476,16 +615,20 @@ vector<Interval> mergeIntervals(vector<Interval> intervals) {
     return mergedIntervals;
 }
 
+/*
+    From horizontal fragments, builds a final horizontal divider
+    Uses the median y-position and the longest connected horizontal interval
+*/
 FinalHorizontalLine buildFinalHorizontalLineFromGroup(
     const vector<int>& ys,
-    const vector<Interval>& intervals
+    const vector<HorizontalInterval>& intervals
 ) {
-    vector<Interval> mergedIntervals = mergeIntervals(intervals);
+    vector<HorizontalInterval> mergedIntervals = mergeHorizontalIntervals(intervals);
 
-    Interval bestInterval = mergedIntervals[0];
+    HorizontalInterval bestInterval = mergedIntervals[0];
     int bestCoverage = bestInterval.rightX - bestInterval.leftX;
 
-    for (const Interval& interval : mergedIntervals) {
+    for (const HorizontalInterval& interval : mergedIntervals) {
         int coverage = interval.rightX - interval.leftX;
 
         if (coverage > bestCoverage) {
@@ -503,6 +646,10 @@ FinalHorizontalLine buildFinalHorizontalLineFromGroup(
     return finalLine;
 }
 
+/*
+    Groups ActualHorizontalLines by similar y-position
+    Each group becomes a final horizontal divider if it has enough connected coverage
+*/
 vector<FinalHorizontalLine> mergeActualHorizontalLines(
     vector<ActualHorizontalLine> actualHorizontalLines,
     int imageWidth
@@ -518,13 +665,13 @@ vector<FinalHorizontalLine> mergeActualHorizontalLines(
     vector<FinalHorizontalLine> finalHorizontalLines;
 
     vector<int> currentYs;
-    vector<Interval> currentIntervals;
+    vector<HorizontalInterval> currentIntervals;
 
     int minConnectedCoverage =
         static_cast<int>(imageWidth * MIN_HORIZONTAL_CONNECTED_COVERAGE_FACTOR);
 
     for (const ActualHorizontalLine& actualLine : actualHorizontalLines) {
-        Interval interval;
+        HorizontalInterval interval;
         interval.leftX = actualLine.leftX;
         interval.rightX = actualLine.rightX;
 
@@ -568,6 +715,10 @@ vector<FinalHorizontalLine> mergeActualHorizontalLines(
     return finalHorizontalLines;
 }
 
+/*
+    Draws final horizontal dividers on the image
+    Marks endpoints for debugging
+*/
 Mat drawFinalHorizontalLines(
     const Mat& img,
     const vector<FinalHorizontalLine>& finalHorizontalLines
@@ -598,6 +749,11 @@ Mat drawFinalHorizontalLines(
     return display;
 }
 
+// Parking spot generation
+
+/*
+    Generates rectangles where parking spots are from the final vertical dividers and horizontal divider
+*/
 vector<ParkingSpot> getParkingSpotLocations(
     const vector<FinalVerticalLine>& finalVerticalLines,
     const vector<FinalHorizontalLine>& finalHorizontalLines,
@@ -619,14 +775,11 @@ vector<ParkingSpot> getParkingSpotLocations(
         }
     );
 
-    // If we have no horizontal divider, we cannot confidently split top/bottom rows yet.
     if (finalHorizontalLines.empty()) {
         cout << "No horizontal divider found, so no parking spots generated yet." << endl;
         return spots;
     }
 
-    // Pick the strongest horizontal divider.
-    // Right now that means the one with the largest connected coverage.
     FinalHorizontalLine rowDivider = finalHorizontalLines[0];
 
     for (const FinalHorizontalLine& line : finalHorizontalLines) {
@@ -637,7 +790,6 @@ vector<ParkingSpot> getParkingSpotLocations(
 
     int dividerY = rowDivider.y;
 
-    // Use only vertical dividers that cross the horizontal row divider.
     vector<FinalVerticalLine> usableVerticalLines;
 
     for (const FinalVerticalLine& verticalLine : verticalLines) {
@@ -667,7 +819,6 @@ vector<ParkingSpot> getParkingSpotLocations(
         bottomYs.push_back(verticalLine.bottomY);
     }
 
-    // Use median so one weird divider endpoint does not distort the whole row.
     int rowTopY = medianValue(topYs);
     int rowBottomY = medianValue(bottomYs);
 
@@ -686,7 +837,6 @@ vector<ParkingSpot> getParkingSpotLocations(
             continue;
         }
 
-        // Top row spot
         Rect topSpotBox(
             leftX + insetX,
             rowTopY + insetY,
@@ -705,7 +855,6 @@ vector<ParkingSpot> getParkingSpotLocations(
             spots.push_back(spot);
         }
 
-        // Bottom row spot
         Rect bottomSpotBox(
             leftX + insetX,
             dividerY + insetY,
@@ -728,6 +877,10 @@ vector<ParkingSpot> getParkingSpotLocations(
     return spots;
 }
 
+/*
+    Draws parking spots on the image
+    Red for occupied, green for vacant
+*/
 Mat drawParkingSpots(const Mat& img, const vector<ParkingSpot>& parkingSpots) {
     Mat display = img.clone();
 
@@ -756,6 +909,12 @@ Mat drawParkingSpots(const Mat& img, const vector<ParkingSpot>& parkingSpots) {
     return display;
 }
 
+// Occupancy classification
+
+/*
+    For one parking spot rectangle, computes density of edges
+    Score is used for an estimate of whether a spot is vacant
+*/
 double computeEdgeDensityInSpot(const Mat& img, const Rect& spotBox) {
     Rect safeBox = spotBox & Rect(0, 0, img.cols, img.rows);
 
@@ -789,6 +948,10 @@ double computeEdgeDensityInSpot(const Mat& img, const Rect& spotBox) {
     return edgePixels / totalPixels;
 }
 
+/*
+    Classifies each parking spot as occupied or vacant depending on its
+    edge density score. Updates occupiedScore and occupied fields of each ParkingSpot
+*/
 void classifyParkingSpots(Mat img, vector<ParkingSpot>& parkingSpots) {
     for (ParkingSpot& spot : parkingSpots) {
         double score = computeEdgeDensityInSpot(img, spot.box);
@@ -806,13 +969,12 @@ void classifyParkingSpots(Mat img, vector<ParkingSpot>& parkingSpots) {
 
 // Main
 
+/*
+    Calls the above methods in a logical sequence
+    Also displays the results
+*/
 int main() {
     Mat img = imread(IMAGE_PATH);
-
-    if (img.empty()) {
-        cout << "Could not load image: " << IMAGE_PATH << endl;
-        return -1;
-    }
 
     Mat edges = getEdges(img);
 
@@ -834,7 +996,7 @@ int main() {
         getActualVerticalLines(verticalHoughLines, actualVerticalLineDisplay);
 
     vector<FinalVerticalLine> mergedVerticalLines =
-        mergeActualVerticalLines(actualVerticalLines);
+        mergeActualVerticalLines(actualVerticalLines, img.rows);
 
     vector<FinalVerticalLine> finalVerticalLines =
         filterCloseVerticalLines(mergedVerticalLines, img.cols);
@@ -892,16 +1054,19 @@ int main() {
     imshow("Original", img);
     imshow("Edges", edges);
     waitKey(0);
+
     imshow("Actual Vertical Lines", actualVerticalLineDisplay);
     imshow("Final Vertical Lines", finalVerticalLineDisplay);
     waitKey(0);
+
     imshow("Actual Horizontal Lines", actualHorizontalLineDisplay);
     imshow("Final Horizontal Lines", finalHorizontalLineDisplay);
     waitKey(0);
+
     imshow("Combined Dividers", combinedDisplay);
     waitKey(0);
-    imshow("Parking Spots", parkingSpotDisplay);
 
+    imshow("Parking Spots", parkingSpotDisplay);
     waitKey(0);
 
     return 0;
